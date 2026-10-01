@@ -1,3 +1,21 @@
+updates-
+
+Intelligent Speed Trainer & Looper:
+Loop boundary listener with dynamic tempo increment ramping across repetitions.
+Dedicated dialog with live preview and controls in the transport menu.
+Modulation Trainer (12 Keys Workout):
+Automated turnaround progression generator through Circle of 5ths/4ths, Chromatic, and Whole-Tone cycles across all 12 keys.
+Integrated into the Song Part menu.
+Interactive Fretboard & Keyboard Visualizer:
+Real-time animated piano keyboard and 6-string guitar/bass fretboard.
+Shows chord roots, chord degrees, scale guides, and live MIDI notes with ~40 FPS throttling via CoalescingTaskScheduler.
+One-Click Minus-One Profiles:
+Fast mixer presets for Bassist, Pianist/Guitarist, Drummer, and Full Band.
+Enhanced CoalescingTaskScheduler & Tests:
+Direct Swing EDT dispatch (requestOnEdt), debounce starvation prevention (maxDelayMs), immediate flush(), and resource dispose().
+Comprehensive unit test suite with precise timing assertions.
+Simplified integration in RP_SYS_CustomPhraseEditor and VisualizerTopComponent.
+
 
 # JJazzLab
 
