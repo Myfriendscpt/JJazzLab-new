@@ -332,7 +332,7 @@ public class RP_SYS_CustomPhraseEditor extends RpCustomEditorDialog<RP_SYS_Custo
             RP_SYS_CustomPhraseValue oldRpValue = spt.getRPValue(rp);
             RP_SYS_CustomPhraseValue newRpValue = oldRpValue.setCustomizedPhrase(rv, p);    // This will make a deep-copy snapshot of p
             // We coalesce requests to limit the number of fired SongStructure change events
-            coalescingTaskScheduler.request(() -> SwingUtilities.invokeLater(() -> sgs.setRhythmParameterValue(spt, rp, newRpValue)));
+            coalescingTaskScheduler.requestOnEdt(() -> sgs.setRhythmParameterValue(spt, rp, newRpValue));
         };
         // p should be garbage-collected after pianoroll editor does not edit p anymore, so our listener with it
         p.addPropertyChangeListener(listener);

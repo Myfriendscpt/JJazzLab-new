@@ -29,8 +29,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.swing.SwingUtilities;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -411,5 +414,100 @@ public class CoalescingTaskSchedulerTest
         Assertions.assertTrue(completed, "Task should execute");
         // Should execute only once despite many concurrent requests
         Assertions.assertEquals(1, executionCount.get(), "Should coalesce all requests into one execution");
+    }
+
+    @Test
+    public void testFlush()
+    {
+        scheduler = new CoalescingTaskScheduler(5000);
+        AtomicInteger counter = new AtomicInteger(0);
+
+        scheduler.request(() -> counter.incrementAndGet());
+        Assertions.assertTrue(scheduler.hasPendingTask());
+        Assertions.assertEquals(0, counter.get());
+
+        scheduler.flush();
+
+        Assertions.assertEquals(1, counter.get(), "Task should execute immediately on flush");
+        Assertions.assertFalse(scheduler.hasPendingTask(), "Should have no pending task after flush");
+    }
+
+    @Test
+    public void testFlush_NoPendingTask()
+    {
+        scheduler = new CoalescingTaskScheduler(5000);
+        Assertions.assertDoesNotThrow(() -> scheduler.flush());
+    }
+
+    @Test
+    public void testRequestOnEdt() throws InterruptedException
+    {
+        scheduler = new CoalescingTaskScheduler(50);
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicBoolean ranOnEdt = new AtomicBoolean(false);
+
+        scheduler.requestOnEdt(() -> 
+        {
+            ranOnEdt.set(SwingUtilities.isEventDispatchThread());
+            latch.countDown();
+        });
+
+        boolean completed = latch.await(SHORT_DELAY, TimeUnit.MILLISECONDS);
+        Assertions.assertTrue(completed, "Task should execute");
+        Assertions.assertTrue(ranOnEdt.get(), "Task should run on Swing EDT");
+    }
+
+    @Test
+    public void testMaxDelay_DebounceStarvationPrevention() throws InterruptedException
+    {
+        long delay = 200;
+        long maxDelay = 400;
+        scheduler = new CoalescingTaskScheduler(delay, maxDelay);
+
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicInteger executionCount = new AtomicInteger(0);
+        AtomicLong executionTime = new AtomicLong(0);
+        long startTime = System.currentTimeMillis();
+
+        // Repeatedly request before delay expires (every 100ms for 600ms total)
+        Thread requester = new Thread(() -> 
+        {
+            for (int i = 0; i < 6; i++)
+            {
+                scheduler.request(() -> 
+                {
+                    executionTime.compareAndSet(0, System.currentTimeMillis());
+                    executionCount.incrementAndGet();
+                    latch.countDown();
+                });
+                try
+                {
+                    Thread.sleep(100);
+                } catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        requester.start();
+
+        boolean completed = latch.await(maxDelay + TOLERANCE + 150, TimeUnit.MILLISECONDS);
+        requester.join();
+
+        Assertions.assertTrue(completed, "Task should fire due to maxDelay constraint despite continuous requests");
+        long elapsed = executionTime.get() - startTime;
+        Assertions.assertTrue(elapsed >= maxDelay - TOLERANCE, "Task should not fire prematurely: elapsed=" + elapsed);
+        Assertions.assertTrue(elapsed <= maxDelay + TOLERANCE + 150, "Task should fire within maxDelay tolerance: elapsed=" + elapsed);
+    }
+
+    @Test
+    public void testDispose()
+    {
+        scheduler = new CoalescingTaskScheduler(1000);
+        AtomicInteger counter = new AtomicInteger(0);
+        scheduler.request(() -> counter.incrementAndGet());
+        Assertions.assertTrue(scheduler.hasPendingTask());
+        scheduler.dispose();
+        Assertions.assertFalse(scheduler.hasPendingTask());
     }
 }

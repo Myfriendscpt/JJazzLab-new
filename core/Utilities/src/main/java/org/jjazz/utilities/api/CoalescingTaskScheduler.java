@@ -31,14 +31,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import javax.swing.SwingUtilities;
 
 /**
  * Call a task after a delay.
  * <p>
- * - User can call request(Runnable task) repeatedly<br>
+ * - User can call request(Runnable task) or requestOnEdt(Runnable task) repeatedly<br>
  * - Runs the *last* Runnable only, after delayMs without new requests (debounce mode) or within a fixed window (throttle mode)<br>
+ * - Optionally bounds the debounce delay by maxDelayMs to prevent starvation under continuous input bursts<br>
+ * - Supports flush() to force immediate execution of the pending task, e.g. on editor/window close<br>
  * <p>
- * By default, the Runnable executes on the scheduler thread. If you need EDT execution, wrap the Runnable: () -> SwingUtilities.invokeLater(...).
+ * By default, request() executes on the scheduler thread. requestOnEdt() executes on the Swing Event Dispatch Thread (EDT).
  * <p>
  * Thread-safe: all public methods can be called from any thread.
  */
@@ -46,11 +49,13 @@ public final class CoalescingTaskScheduler
 {
 
     private final long delayMs;
+    private final long maxDelayMs;
     private final boolean restartDelayOnNewRequest;
     private final Object lock = new Object();
     private final Consumer<Throwable> exceptionHandler;
     private ScheduledFuture<?> scheduled;
     private Runnable lastAction;
+    private long firstRequestTimeMs;
     private static final Logger LOGGER = Logger.getLogger(CoalescingTaskScheduler.class.getSimpleName());
 
     /**
@@ -61,7 +66,7 @@ public final class CoalescingTaskScheduler
      */
     public CoalescingTaskScheduler(long delayMs)
     {
-        this(delayMs, true, null);
+        this(delayMs, 0, true, null);
     }
 
     /**
@@ -73,11 +78,11 @@ public final class CoalescingTaskScheduler
      */
     public CoalescingTaskScheduler(long delayMs, Consumer<Throwable> exceptionHandler)
     {
-        this(delayMs, true, exceptionHandler);
+        this(delayMs, 0, true, exceptionHandler);
     }
 
     /**
-     * Create a CoalescingTaskScheduler with full configuration.
+     * Create a CoalescingTaskScheduler with full configuration (without maxDelay).
      *
      * @param delayMs                  The delay in milliseconds before executing the task
      * @param restartDelayOnNewRequest If true (debounce mode): each new request resets the delay timer. If false (throttle mode): the first request starts a
@@ -86,8 +91,35 @@ public final class CoalescingTaskScheduler
      */
     public CoalescingTaskScheduler(long delayMs, boolean restartDelayOnNewRequest, Consumer<Throwable> exceptionHandler)
     {
+        this(delayMs, 0, restartDelayOnNewRequest, exceptionHandler);
+    }
+
+    /**
+     * Create a CoalescingTaskScheduler in debounce mode with max delay bound to prevent starvation.
+     *
+     * @param delayMs    The delay in milliseconds before executing the task
+     * @param maxDelayMs Maximum wait time in milliseconds from the first request before forcing task execution (0 for unbounded)
+     */
+    public CoalescingTaskScheduler(long delayMs, long maxDelayMs)
+    {
+        this(delayMs, maxDelayMs, true, null);
+    }
+
+    /**
+     * Create a CoalescingTaskScheduler with full configuration including max delay bound.
+     *
+     * @param delayMs                  The delay in milliseconds before executing the task
+     * @param maxDelayMs               Maximum wait time in milliseconds from the first request before forcing task execution (0 for unbounded)
+     * @param restartDelayOnNewRequest If true (debounce mode): each new request resets the delay timer. If false (throttle mode): the first request starts a
+     *                                 fixed delay window, subsequent requests only update the task to run.
+     * @param exceptionHandler         Optional handler for exceptions thrown by scheduled tasks. If null, exceptions are logged at WARNING level.
+     */
+    public CoalescingTaskScheduler(long delayMs, long maxDelayMs, boolean restartDelayOnNewRequest, Consumer<Throwable> exceptionHandler)
+    {
         Preconditions.checkArgument(delayMs >= 0, "delayMs=%s", delayMs);
+        Preconditions.checkArgument(maxDelayMs >= 0, "maxDelayMs=%s", maxDelayMs);
         this.delayMs = delayMs;
+        this.maxDelayMs = maxDelayMs;
         this.restartDelayOnNewRequest = restartDelayOnNewRequest;
         this.exceptionHandler = exceptionHandler;
     }
@@ -106,12 +138,32 @@ public final class CoalescingTaskScheduler
         synchronized (lock)
         {
             lastAction = action;
+            long now = System.currentTimeMillis();
+            if (firstRequestTimeMs == 0)
+            {
+                firstRequestTimeMs = now;
+            }
 
             // In throttle mode, if already scheduled, just update lastAction without restarting
             if (!restartDelayOnNewRequest && scheduled != null && !scheduled.isDone())
             {
                 // Don't restart the delay, just updated lastAction
                 return;
+            }
+
+            long nextDelay = delayMs;
+            if (restartDelayOnNewRequest && maxDelayMs > 0)
+            {
+                long elapsed = now - firstRequestTimeMs;
+                long remaining = maxDelayMs - elapsed;
+                if (remaining <= 0)
+                {
+                    nextDelay = 0;
+                }
+                else if (remaining < delayMs)
+                {
+                    nextDelay = remaining;
+                }
             }
 
             // In debounce mode, or in throttle mode with no pending task: (re)start the delay
@@ -129,6 +181,7 @@ public final class CoalescingTaskScheduler
                     toRun = lastAction;
                     scheduled = null;
                     lastAction = null;  // Clear reference to prevent memory leak
+                    firstRequestTimeMs = 0;
                 }
 
                 if (toRun != null)
@@ -141,7 +194,60 @@ public final class CoalescingTaskScheduler
                         handleException(ex);
                     }
                 }
-            }, delayMs, TimeUnit.MILLISECONDS);
+            }, nextDelay, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /**
+     * Schedule action to run on the Swing Event Dispatch Thread (EDT) after delayMs.
+     * If execution already occurs on EDT, it runs directly; otherwise it is dispatched via SwingUtilities.invokeLater.
+     *
+     * @param action The task to execute on EDT
+     */
+    public void requestOnEdt(Runnable action)
+    {
+        Objects.requireNonNull(action, "action");
+        request(() -> 
+        {
+            if (SwingUtilities.isEventDispatchThread())
+            {
+                action.run();
+            }
+            else
+            {
+                SwingUtilities.invokeLater(action);
+            }
+        });
+    }
+
+    /**
+     * Flush and immediately execute any pending action, cancelling the timer.
+     * If no action is pending, this method does nothing.
+     */
+    public void flush()
+    {
+        Runnable toRun;
+        synchronized (lock)
+        {
+            if (scheduled != null)
+            {
+                scheduled.cancel(false);
+                scheduled = null;
+            }
+            toRun = lastAction;
+            lastAction = null;
+            firstRequestTimeMs = 0;
+        }
+
+        if (toRun != null)
+        {
+            try
+            {
+                toRun.run();
+            } catch (Throwable ex)
+            {
+                handleException(ex);
+            }
         }
     }
 
@@ -160,7 +266,16 @@ public final class CoalescingTaskScheduler
                 scheduled = null;
             }
             lastAction = null;  // Clear reference to prevent memory leak
+            firstRequestTimeMs = 0;
         }
+    }
+
+    /**
+     * Alias for cancel(), releasing references to pending tasks.
+     */
+    public void dispose()
+    {
+        cancel();
     }
 
     /**
@@ -186,6 +301,16 @@ public final class CoalescingTaskScheduler
     public long getDelayMs()
     {
         return delayMs;
+    }
+
+    /**
+     * Get the configured maximum delay in milliseconds (0 means unbounded).
+     *
+     * @return the maximum delay before forcing execution
+     */
+    public long getMaxDelayMs()
+    {
+        return maxDelayMs;
     }
 
     /**
@@ -224,3 +349,4 @@ public final class CoalescingTaskScheduler
         }
     }
 }
+

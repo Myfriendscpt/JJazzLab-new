@@ -13,6 +13,10 @@
                     <attr name="displayName" bundlevalue="org.jjazz.mixconsole.Bundle#MixConsoleMenuBarEdit"/>                    
                     <attr intvalue="200" name="position"/>
                 </folder>
+                <folder name="Profiles">
+                    <attr name="displayName" bundlevalue="org.jjazz.mixconsole.Bundle#MixConsoleMenuBarProfiles"/>
+                    <attr intvalue="250" name="position"/>
+                </folder>
                 <folder name="Midi">
                     <attr intvalue="300" name="position"/>
                 </folder>
